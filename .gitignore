@@ -1,0 +1,12 @@
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+
+# session logs
+session-log-*.md
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
