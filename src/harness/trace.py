@@ -1,7 +1,7 @@
 """Prints what crosses the wire.
 
 The harness exists to be watched, so the trace is a feature, not debug output:
-every request and every token count is shown.
+every request, every tool call and every token count is shown.
 """
 
 import json
@@ -14,20 +14,21 @@ PLAIN = {name: "" for name in COLOR}
 
 class Tracer:
     """Writes the harness's narration. Verbose adds the full JSON of each
-    request and response."""
+    request and response, and tool input and output in full."""
 
     def __init__(self, out: TextIO, color: bool = False, verbose: bool = False):
         self.out = out
         self.c = COLOR if color else PLAIN
         self.verbose = verbose
 
-    def request(self, turn: int, messages: int, model: str) -> None:
+    def request(self, turn: int, messages: int, model: str, tools: list[str]) -> None:
         """Announces an outgoing request. `messages` is the size of the history --
         watching it grow is the point: the API is stateless, so the harness resends
         everything every turn."""
         c = self.c
         self._print(f"{c['bold']}{c['blue']}→ turn {turn}{c['reset']} "
-                    f"{c['dim']}request to {model} · {messages} message(s) in history{c['reset']}")
+                    f"{c['dim']}request to {model} · {messages} message(s) in history · "
+                    f"tools: {', '.join(tools)}{c['reset']}")
 
     def text(self, s: str) -> None:
         """Reports assistant prose."""
@@ -38,6 +39,18 @@ class Tracer:
         """Reports a summarized reasoning block, when one is present."""
         if s.strip():
             self._print(f"{self.c['dim']}[thinking] {_indent(s.strip(), ' ' * 11)}{self.c['reset']}")
+
+    def tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
+        """Reports that the model asked for a tool."""
+        c = self.c
+        self._print(f"  {c['bold']}{c['yellow']}⚙ {name}{c['reset']}{c['dim']} "
+                    f"{_compact(tool_input, self.verbose)}{c['reset']}")
+
+    def tool_result(self, name: str, result: str, is_error: bool) -> None:
+        """Reports what the harness sent back."""
+        mark, color = ("✗", self.c["red"]) if is_error else ("↩", self.c["green"])
+        preview = result if self.verbose else _first_lines(result, 3, 300)
+        self._print(f"  {color}{mark}{self.c['reset']}{self.c['dim']} {_indent(preview, '    ')}{self.c['reset']}")
 
     def stop(self, reason: str, tokens_in: int, tokens_out: int) -> None:
         """Reports the stop reason and token usage that ended a turn."""
@@ -61,6 +74,21 @@ def _jsonable(value: Any) -> Any:
     # SDK objects (the response, content blocks in the history) know how to
     # turn themselves into plain dicts.
     return value.to_dict() if hasattr(value, "to_dict") else str(value)
+
+
+def _compact(tool_input: dict[str, Any], verbose: bool) -> str:
+    # Tool input on one line, cut short unless verbose.
+    s = json.dumps(tool_input, ensure_ascii=False)
+    return s if verbose or len(s) <= 160 else s[:160] + "…"
+
+
+def _first_lines(s: str, n: int, max_len: int) -> str:
+    lines = s.rstrip("\n").split("\n")
+    out = "\n".join(lines[:n])
+    truncated = len(lines) > n
+    if len(out) > max_len:
+        out, truncated = out[:max_len], True
+    return out + " …" if truncated else out
 
 
 def _indent(s: str, prefix: str) -> str:
