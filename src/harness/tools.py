@@ -4,6 +4,7 @@ The registry is the only place that knows a tool exists. Adding a tool means
 adding one Tool here -- the agent loop stays untouched.
 """
 
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,9 +68,9 @@ class Registry:
 
 
 def default_tools() -> Registry:
-    """The tool set the harness starts with. Two read-only tools are enough for
-    the model to explore a directory, and neither can break anything."""
-    return Registry(read_file(), list_dir())
+    """The tool set the harness starts with. Three tools are enough for the
+    model to do real work while the whole surface still fits on a slide."""
+    return Registry(read_file(), list_dir(), bash())
 
 
 def read_file() -> Tool:
@@ -95,6 +96,35 @@ def list_dir() -> Tool:
         name="list_dir",
         description="List the files and directories at the given path. Defaults to the working directory.",
         properties={"path": {"type": "string", "description": 'Directory to list; defaults to "."'}},
+        handler=handler,
+    )
+
+
+def bash() -> Tool:
+    """Runs a shell command.
+
+    This is deliberately unsandboxed -- it is what makes the demo feel like a
+    real harness. A production harness would gate it behind user approval; see
+    the approval hook in harness.agent.
+    """
+    def handler(tool_input: dict[str, Any]) -> str:
+        command = tool_input.get("command", "")
+        if not command.strip():
+            raise ValueError("empty command")
+        proc = subprocess.run(["bash", "-c", command], stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True)
+        output = truncate(proc.stdout)
+        if proc.returncode != 0:
+            # A non-zero exit is information for the model, not a harness
+            # failure -- hand back the output alongside the status.
+            raise RuntimeError(f"exit status {proc.returncode}\n{output}".rstrip())
+        return output or "(no output)"
+
+    return Tool(
+        name="bash",
+        description="Run a shell command and return its combined stdout and stderr. Use for anything the other tools do not cover.",
+        properties={"command": {"type": "string", "description": "The shell command to run"}},
+        required=["command"],
         handler=handler,
     )
 

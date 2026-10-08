@@ -1,5 +1,7 @@
 import io
 
+import pytest
+
 from conftest import message, text
 
 from harness.agent import Agent
@@ -85,6 +87,34 @@ def test_tool_error_is_reported_not_fatal(fake_api):
     result = api.requests[1]["messages"][2]["content"][0]
     assert result["is_error"] is True
     assert "disk on fire" in result["content"]
+
+
+def test_approver_denial_reaches_model(fake_api):
+    """A denied call still produces a tool_result, so the model learns why and
+    can adapt."""
+    api = fake_api(message("tool_use", tool_use("toolu_1", "echo")),
+                   message("end_turn", text("understood")))
+    ran = []
+    agent = new_agent(api, Registry(echo(lambda tool_input: ran.append(1) or "should not happen")),
+                      approve=lambda name, tool_input: "Tool call denied by the user.")
+
+    agent.run("go")
+
+    assert ran == []
+    result = api.requests[1]["messages"][2]["content"][0]
+    assert result["is_error"] is True
+    assert "denied" in result["content"]
+
+
+def test_max_turns_stops_runaway_loop(fake_api):
+    """A model that only ever asks for tools must not spin forever."""
+    limit = 3
+    api = fake_api(*[message("tool_use", tool_use("toolu_1", "echo")) for _ in range(limit)])
+    agent = new_agent(api, Registry(echo()), max_turns=limit)
+
+    with pytest.raises(RuntimeError, match="gave up"):
+        agent.run("loop")
+    assert len(api.requests) == limit
 
 
 def test_run_keeps_history_across_calls(fake_api):

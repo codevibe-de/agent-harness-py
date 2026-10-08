@@ -4,6 +4,7 @@ stops asking for tools.
 The whole mechanism is Agent.run below. It is written to be read top to bottom.
 """
 
+from collections.abc import Callable
 from typing import Any
 
 import anthropic
@@ -12,12 +13,19 @@ from harness.session import NullLog, SessionLog
 from harness.tools import Registry
 from harness.trace import Tracer
 
+# Consulted before a tool runs. Returning a non-empty string denies the call,
+# and that string is handed to the model as the error result.
+#
+# This is the hook a real harness hangs its permission prompts on.
+Approver = Callable[[str, dict[str, Any]], str]
+
 
 class Agent:
     """Owns one conversation."""
 
     def __init__(self, client: anthropic.Anthropic, *, model: str, tools: Registry,
                  trace: Tracer, system: str = "", max_tokens: int = 16000,
+                 max_turns: int = 20, approve: Approver | None = None,
                  log: SessionLog | NullLog | None = None):
         self.client = client
         self.model = model
@@ -25,6 +33,10 @@ class Agent:
         self.trace = trace
         self.system = system
         self.max_tokens = max_tokens
+        # Bounds the loop so a model that keeps calling tools forever still
+        # terminates.
+        self.max_turns = max_turns
+        self.approve = approve
         # Records every request and response; NullLog records nothing.
         self.log = log or NullLog()
 
@@ -43,11 +55,11 @@ class Agent:
         self.messages.append({"role": "user", "content": prompt})
         final = ""
 
-        # Nothing stops this loop but the model itself. What if it never stops
-        # asking for tools?
         turn = 0
         while True:
             turn += 1
+            if turn > self.max_turns:
+                raise RuntimeError(f"gave up after {self.max_turns} turns")
 
             # ── 1. Send the whole conversation, plus the tool definitions. ───
             #
@@ -125,13 +137,17 @@ class Agent:
             self.messages.append({"role": "user", "content": tool_results})
 
     def _run_tool(self, name: str, tool_input: dict[str, Any]) -> tuple[str, bool]:
-        """Dispatches to the registry and turns an exception into text the
-        model can read.
+        """Applies the approval hook, dispatches to the registry, and turns an
+        exception into text the model can read.
 
         It never raises: a failed tool is a normal event in the conversation,
         and the model routinely recovers from one. Aborting the loop on a tool
         error would be the wrong behaviour.
         """
+        if self.approve is not None:
+            deny = self.approve(name, tool_input)
+            if deny:
+                return deny, True
         try:
             return self.tools.run(name, tool_input), False
         except Exception as err:
